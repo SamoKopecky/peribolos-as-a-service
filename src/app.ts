@@ -30,6 +30,19 @@ const generateTaskPayload = (name: string, context: any) => ({
   },
 });
 
+const taskRunIssueName = ' failed';
+const taskRunIssueTrigger = '- [ ] Re-run this task';
+
+const getOwner = async (context: any) => {
+  const appSecret = await useApi(APIS.CoreV1Api).readNamespacedSecret(
+    getTokenSecretName(context),
+    getNamespace()
+  );
+  return Buffer.from(<string>appSecret?.body?.data?.orgName, 'base64').toString(
+    'binary'
+  );
+};
+
 const getTaskName = async (taskRun: Promise<any>) =>
   (await taskRun).body.metadata.name;
 
@@ -83,10 +96,6 @@ const handleTaskRunResult = async (
     log.warn(taskName + ' failed.');
 
     // Used for org name
-    const appSecret = await useApi(APIS.CoreV1Api).readNamespacedSecret(
-      getTokenSecretName(context),
-      getNamespace()
-    );
 
     // Used for pod name
     const taskRunObject: any = await useApi(
@@ -106,19 +115,18 @@ const handleTaskRunResult = async (
     );
 
     context.octokit.issues.create({
-      owner: Buffer.from(
-        <string>appSecret?.body?.data?.orgName,
-        'base64'
-      ).toString('binary'),
+      owner: await getOwner(context),
       repo: '.github',
-      title: taskName + ' failed',
+      title: taskName + taskRunIssueName,
       body:
         'Logs for `' +
         taskName +
         '`:\n' +
         '```json\n' +
         podObject.body +
-        '\n```',
+        '\n```\n' +
+        'If you want to re-run this taskRun click the box bellow\n' +
+        taskRunIssueTrigger,
     });
   } else {
     log.info(taskName + ' succeeded.');
@@ -139,6 +147,11 @@ export default (
   const router = getRouter();
   router.get('/healthz', (_, response) => response.status(200).send('OK'));
   exposeMetrics(router, '/metrics');
+
+  const taskToMethod = new Map([
+    ['peribolos-run', 'schedulePushTask'],
+    ['peribolos-dump-config', 'scheduleDumpConfig]'],
+  ]);
 
   // Register tracked metrics
   const numberOfInstallTotal = useCounter({
@@ -182,6 +195,27 @@ export default (
     return callback;
   };
 
+  const runTaskRun = async (taskName: string, context: any) => {
+    const taskRunName = await getTaskName(
+      wrapOperationWithMetrics(
+        useApi(APIS.CustomObjectsApi).createNamespacedCustomObject(
+          'tekton.dev',
+          'v1beta1',
+          getNamespace(),
+          'taskruns',
+          generateTaskPayload(taskName, context)
+        ),
+        {
+          install: context.payload.installation.id,
+          method: taskToMethod.get(taskName),
+        }
+      )
+    );
+    await checkTaskStatus(taskRunName, app.log).then((failed) => {
+      handleTaskRunResult(<boolean>failed, taskRunName, app.log, context);
+    });
+  };
+
   app.onAny((context: any) => {
     // On any event inc() the counter
     numberOfActionsTotal
@@ -190,6 +224,42 @@ export default (
         action: context.payload.action,
       })
       .inc();
+  });
+
+  app.on('issues.edited', async (context: any) => {
+    const issueNameRegExp = new RegExp(
+      `^(peribolos-.*)-.{5}${taskRunIssueName}$`
+    );
+    let result;
+    if ((result = issueNameRegExp.exec(context.payload.issue.title)) === null) {
+      return;
+    }
+    app.log.info('TaskRun fail issue edited');
+    if (
+      context.payload.issue.body.includes(
+        taskRunIssueTrigger.replace('[ ]', '[x]')
+      )
+    ) {
+      const owner = await getOwner(context);
+      const issue_number = context.payload.issue.number;
+      const taskName = result[1];
+
+      context.octokit.issues.createComment({
+        owner: owner,
+        repo: '.github',
+        issue_number: issue_number,
+        body: 'Creating a new `' + taskName + '` task run.',
+      });
+
+      context.octokit.issues.update({
+        owner: owner,
+        repo: '.github',
+        issue_number: issue_number,
+        state: 'closed',
+      });
+
+      await runTaskRun(taskName, context);
+    }
   });
 
   app.on('installation.created', async (context: any) => {
@@ -220,24 +290,7 @@ export default (
     });
 
     // Trigger dump-config taskrun
-    const taskName = await getTaskName(
-      wrapOperationWithMetrics(
-        useApi(APIS.CustomObjectsApi).createNamespacedCustomObject(
-          'tekton.dev',
-          'v1beta1',
-          getNamespace(),
-          'taskruns',
-          generateTaskPayload('peribolos-dump-config', context)
-        ),
-        {
-          install: context.payload.installation.id,
-          method: 'scheduleDumpConfig',
-        }
-      )
-    );
-    await checkTaskStatus(taskName, app.log).then((failed) => {
-      handleTaskRunResult(<boolean>failed, taskName, app.log, context);
-    });
+    await runTaskRun('peribolos-dump-config', context);
   });
 
   app.on('push', async (context: any) => {
@@ -266,25 +319,7 @@ export default (
       method: 'updateSecret',
     });
 
-    const taskName = await getTaskName(
-      wrapOperationWithMetrics(
-        useApi(APIS.CustomObjectsApi).createNamespacedCustomObject(
-          'tekton.dev',
-          'v1beta1',
-          getNamespace(),
-          'taskruns',
-          generateTaskPayload('peribolos-run', context)
-        ),
-        {
-          install: context.payload.installation.id,
-          method: 'schedulePushTask',
-        }
-      )
-    );
-
-    await checkTaskStatus(taskName, app.log).then((failed) => {
-      handleTaskRunResult(<boolean>failed, taskName, app.log, context);
-    });
+    await runTaskRun('peribolos-run', context);
   });
 
   app.on('installation.deleted', async (context: any) => {
