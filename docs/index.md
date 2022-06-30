@@ -1,3 +1,3 @@
-# example docs
+# Peribolos docs
 
-This is a basic example of documentation.
+Peribolos docs will be here.

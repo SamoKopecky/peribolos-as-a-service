@@ -2,16 +2,16 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: Peribolos
-  description: Peribolos service
+  description: Declarative GitHub Organization management via Peribolos as a service
   links:
-    - url: https://example.org
+    - url: https://github.com/operate-first/peribolos-as-a-service/blob/main/SUPPORT.md
       title: Support path
       icon: user
   annotations:
-    operate-first.cloud/component-icon-url: https://picsum.photos/200
+    operate-first.cloud/component-icon-url: https://raw.githubusercontent.com/operate-first/peribolos-as-a-service/main/static/robot.svg
     backstage.io/techdocs-ref: dir:.
 spec:
   type: service
   lifecycle: production
-  owner: group:group1
-  system: system:system1
+  owner: group:operate-first
+  system: system:operate-first-cloud
